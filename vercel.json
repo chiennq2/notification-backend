@@ -2,7 +2,7 @@
   "version": 2,
   "functions": {
     "api/index.ts": {
-      "runtime": "node@20.x",
+      "runtime": "node@18.x",
       "maxDuration": 60
     }
   },
