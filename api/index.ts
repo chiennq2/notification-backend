@@ -1,3 +1,4 @@
+import type { IncomingMessage, ServerResponse } from 'http';
 import app from '../src/index';
 
-export default app;
+export default (req: IncomingMessage, res: ServerResponse) => app(req, res);
