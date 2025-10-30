@@ -2,25 +2,32 @@
 import express from 'express';
 import cors from 'cors';
 import * as admin from 'firebase-admin';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
+import path from 'path';
 
 // Khởi tạo Firebase Admin SDK
-const serviceAccount = JSON.parse(
-  readFileSync('./serviceAccountKey.json', 'utf8')
-);
+const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
+let serviceAccountConfig: admin.ServiceAccount;
 
-// const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
-// if (!serviceAccountBase64) {
-//   throw new Error('FIREBASE_SERVICE_ACCOUNT_BASE64 not set');
-// }
+if (serviceAccountBase64) {
+  serviceAccountConfig = JSON.parse(
+    Buffer.from(serviceAccountBase64, 'base64').toString('utf8')
+  ) as admin.ServiceAccount;
+} else {
+  const serviceAccountPath = path.resolve(process.cwd(), 'serviceAccountKey.json');
+  if (!existsSync(serviceAccountPath)) {
+    throw new Error('FIREBASE_SERVICE_ACCOUNT_BASE64 not set and serviceAccountKey.json missing');
+  }
+  serviceAccountConfig = JSON.parse(
+    readFileSync(serviceAccountPath, 'utf8')
+  ) as admin.ServiceAccount;
+}
 
-// const serviceAccount = JSON.parse(
-//   Buffer.from(serviceAccountBase64, 'base64').toString('utf8')
-// );
-
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccountConfig),
+  });
+}
 
 const app = express();
 const db = admin.firestore();
@@ -242,72 +249,70 @@ app.delete('/api/notifications/scheduled/:id', authenticate, requireAdmin, async
 
 // ===== CRON JOB - Xử lý thông báo đã lên lịch =====
 // Chạy mỗi phút
-setInterval(async () => {
-  try {
-    const now = new Date();
-    
-    const snapshot = await db
-      .collection('scheduledNotifications')
-      .where('status', '==', 'pending')
-      .where('scheduledTime', '<=', now)
-      .get();
+if (!process.env.VERCEL) {
+  setInterval(async () => {
+    try {
+      const now = new Date();
+      
+      const snapshot = await db
+        .collection('scheduledNotifications')
+        .where('status', '==', 'pending')
+        .where('scheduledTime', '<=', now)
+        .get();
 
-    if (snapshot.empty) return;
+      if (snapshot.empty) return;
 
-    for (const doc of snapshot.docs) {
-      const notification = doc.data();
+      for (const doc of snapshot.docs) {
+        const notification = doc.data();
 
-      try {
-        // Lấy tokens
-        const tokensSnapshot = await db.collection('deviceTokens').get();
-        const tokens = tokensSnapshot.docs.map(d => d.data().token);
+        try {
+          const tokensSnapshot = await db.collection('deviceTokens').get();
+          const tokens = tokensSnapshot.docs.map(d => d.data().token);
 
-        if (tokens.length === 0) continue;
+          if (tokens.length === 0) continue;
 
-        // Gửi thông báo
-        const message = {
-          notification: {
-            title: notification.title,
-            body: notification.body,
-          },
-          tokens,
-        };
+          const message = {
+            notification: {
+              title: notification.title,
+              body: notification.body,
+            },
+            tokens,
+          };
 
-        const response = await messaging.sendEachForMulticast(message);
+          const response = await messaging.sendEachForMulticast(message);
 
-        // Cập nhật status
-        const updateData: any = {
-          status: 'sent',
-          sentAt: admin.firestore.FieldValue.serverTimestamp(),
-          successCount: response.successCount,
-          failureCount: response.failureCount,
-        };
+          const updateData: any = {
+            status: 'sent',
+            sentAt: admin.firestore.FieldValue.serverTimestamp(),
+            successCount: response.successCount,
+            failureCount: response.failureCount,
+          };
 
-        // Nếu là thông báo lặp lại
-        if (notification.recurring?.enabled) {
-          const nextTime = calculateNextScheduledTime(
-            notification.scheduledTime.toDate(),
-            notification.recurring
-          );
-          updateData.scheduledTime = nextTime;
-          updateData.status = 'pending';
+          if (notification.recurring?.enabled) {
+            const nextTime = calculateNextScheduledTime(
+              notification.scheduledTime.toDate(),
+              notification.recurring
+            );
+            updateData.scheduledTime = nextTime;
+            updateData.status = 'pending';
+          }
+
+          await doc.ref.update(updateData);
+
+          console.log(`✅ Sent notification: ${doc.id}`);
+        } catch (error) {
+          console.error(`❌ Error sending notification ${doc.id}:`, error);
+          await doc.ref.update({
+            status: 'failed',
+            error: String(error),
+          });
         }
-
-        await doc.ref.update(updateData);
-
-        console.log(`✅ Sent notification: ${doc.id}`);
-      } catch (error) {
-        console.error(`❌ Error sending notification ${doc.id}:`, error);
-        await doc.ref.update({
-          status: 'failed',
-          error: String(error),
-        });
       }
+    } catch (error) {
+      console.error('Cron job error:', error);
     }
-  } catch (error) {
-    console.error('Cron job error:', error);
-  }
-}, 60000); // Chạy mỗi 60 giây
+  }, 60000);
+}
 
 // Hàm tính thời gian tiếp theo
 function calculateNextScheduledTime(currentTime: Date, recurring: any): Date {
@@ -330,6 +335,11 @@ app.get('/health', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+  });
+}
+
+export default app;
