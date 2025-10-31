@@ -52,7 +52,13 @@ app.use(express.json());
 // Auth middleware
 async function authenticate(req: any, res: any, next: any) {
   try {
-    const authHeader = req.headers.authorization;
+    // Get authorization header in a case-insensitive way
+    const authHeader = req.headers['authorization'] || req.headers['Authorization'];
+    
+    // Add logging for debugging
+    console.log('Request headers:', Object.keys(req.headers));
+    console.log('Auth header found:', !!authHeader);
+    
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
@@ -61,20 +67,8 @@ async function authenticate(req: any, res: any, next: any) {
     req.user = decodedToken;
     next();
   } catch (error: any) {
+    console.error('Authentication error:', error);
     res.status(401).json({ error: 'Invalid token' });
-  }
-}
-
-async function requireAdmin(req: any, res: any, next: any) {
-  try {
-    const userDoc = await db.collection('users').doc(req.user.uid).get();
-    const userData = userDoc.data();
-    if (userData?.role !== 'admin') {
-      return res.status(403).json({ error: 'Admin access required' });
-    }
-    next();
-  } catch (error) {
-    res.status(500).json({ error: 'Server error' });
   }
 }
 
