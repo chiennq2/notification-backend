@@ -72,6 +72,18 @@ async function authenticate(req: any, res: any, next: any) {
   }
 }
 
+async function requireAdmin(req: any, res: any, next: any) {
+  try {
+    const userDoc = await db.collection('users').doc(req.user.uid).get();
+    const userData = userDoc.data();
+    if (userData?.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    next();
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+}
 // ===== API ENDPOINTS =====
 
 // 1. Gửi thông báo đến tất cả NGAY LẬP TỨC
