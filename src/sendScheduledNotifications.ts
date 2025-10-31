@@ -26,7 +26,7 @@ async function sendNotificationWithOfflineSupport(tokens, options) {
         ...data,
       },
       android: {
-        priority: 'high',
+        priority: "high" as "high" | "normal",
         ttl: 2419200000, // 28 days
         notification: {
           sound: 'default',
@@ -132,7 +132,14 @@ export default async function handler(req, res) {
             data: notification.data,
           });
 
-          const updateData = {
+          let updateData: {
+            status: string;
+            sentAt: admin.firestore.FieldValue;
+            successCount: number;
+            failureCount: number;
+            scheduledTime?: admin.firestore.Timestamp;
+            [key: string]: any;
+          } = {
             status: 'sent',
             sentAt: admin.firestore.FieldValue.serverTimestamp(),
             successCount: result.successCount,
