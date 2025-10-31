@@ -255,7 +255,7 @@ app.post('/api/notifications/send-all', authenticate, requireAdmin, async (req, 
       data: data || null,
       targetType: 'all',
       sentAt: admin.firestore.FieldValue.serverTimestamp(),
-      sentBy: req.user.uid,
+      // sentBy: req.user.uid,
       ...result,
     });
 
@@ -322,7 +322,7 @@ app.post('/api/notifications/schedule', authenticate, requireAdmin, async (req, 
       scheduledTime: new Date(scheduledTime),
       status: 'pending',
       targetType: 'all',
-      createdBy: req.user.uid,
+      // createdBy: req.user.uid,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       recurring: recurring || null,
     };
@@ -334,6 +334,75 @@ app.post('/api/notifications/schedule', authenticate, requireAdmin, async (req, 
     res.status(500).json({ error: error.message });
   }
 });
+
+// ===== 3.5. Xử lý gửi thông báo đã lên lịch (chuyển từ sendScheduledNotifications.ts) =====
+
+// API endpoint để xử lý gửi thông báo đã lên lịch
+app.get('/api/notifications/send-scheduled', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const now = new Date();
+    const snapshot = await db
+      .collection('scheduledNotifications')
+      .where('status', '==', 'pending')
+      .where('scheduledTime', '<=', now)
+      .get();
+
+    if (snapshot.empty) {
+      return res.status(200).json({ message: 'No scheduled notifications to send' });
+    }
+
+    console.log(`⏰ Processing ${snapshot.docs.length} scheduled notifications`);
+
+    for (const doc of snapshot.docs) {
+      const notification = doc.data();
+      try {
+        const tokensSnapshot = await db.collection('deviceTokens').get();
+        const tokens = tokensSnapshot.docs.map((d) => d.data().token);
+
+        if (tokens.length === 0) continue;
+
+        const result = await sendNotificationWithOfflineSupport(tokens, {
+          title: notification.title,
+          body: notification.body,
+          imageUrl: notification.imageUrl,
+          clickAction: notification.clickAction,
+          data: notification.data,
+        });
+
+        const updateData: any = {
+          status: 'sent',
+          sentAt: admin.firestore.FieldValue.serverTimestamp(),
+          successCount: result.successCount,
+          failureCount: result.failureCount,
+        };
+
+        if (notification.recurring?.enabled) {
+          const nextTime = calculateNextScheduledTime(
+            notification.scheduledTime.toDate(),
+            notification.recurring
+          );
+          updateData.scheduledTime = admin.firestore.Timestamp.fromDate(nextTime);
+          updateData.status = 'pending';
+        }
+
+        await doc.ref.update(updateData);
+        console.log(`✅ Sent scheduled notification: ${doc.id}`);
+      } catch (error) {
+        console.error(`❌ Error: ${doc.id}`, error);
+        await doc.ref.update({
+          status: 'failed',
+          error: String(error),
+        });
+      }
+    }
+
+    res.status(200).json({ message: 'Scheduled notifications processed successfully' });
+  } catch (error) {
+    console.error('Error processing scheduled notifications:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 
 // 4. Lấy danh sách thông báo đã lên lịch
 app.get('/api/notifications/scheduled', authenticate, requireAdmin, async (req, res) => {
@@ -364,7 +433,7 @@ app.delete('/api/notifications/scheduled/:id', authenticate, requireAdmin, async
       .update({ 
         status: 'cancelled',
         cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
-        cancelledBy: req.user.uid
+        // cancelledBy: req.user.uid
       });
 
     res.json({ success: true });
