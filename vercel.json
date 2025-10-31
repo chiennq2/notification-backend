@@ -3,12 +3,19 @@
   "functions": {
     "api/index.ts": {
       "maxDuration": 60
+    },
+    "api/sendScheduledNotifications.ts": {
+      "maxDuration": 60
     }
   },
   "rewrites": [
     {
       "source": "/(.*)",
       "destination": "/api/index"
+    },
+    {
+      "source": "/api/cron/send-scheduled-notifications",
+      "destination": "/api/sendScheduledNotifications"
     }
   ]
 }
