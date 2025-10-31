@@ -14,82 +14,64 @@ declare global {
   }
 }
 
-// Khởi tạo Firebase Admin SDK
-const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
-let serviceAccountConfig: admin.ServiceAccount;
-
-if (serviceAccountBase64) {
-  serviceAccountConfig = JSON.parse(
-    Buffer.from(serviceAccountBase64, 'base64').toString('utf8')
-  ) as admin.ServiceAccount;
-} else {
-  const serviceAccountPath = path.resolve(process.cwd(), 'serviceAccountKey.json');
-  if (!existsSync(serviceAccountPath)) {
-    throw new Error('FIREBASE_SERVICE_ACCOUNT_BASE64 not set and serviceAccountKey.json missing');
+// Initialize Firebase
+const initializeFirebase = () => {
+  const base64ServiceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
+  if (!base64ServiceAccount) {
+    throw new Error('❌ FIREBASE_SERVICE_ACCOUNT_BASE64 not set');
   }
-  serviceAccountConfig = JSON.parse(
-    readFileSync(serviceAccountPath, 'utf8')
-  ) as admin.ServiceAccount;
-}
 
-if (!admin.apps.length) {
+  const serviceAccountJson = Buffer.from(base64ServiceAccount, 'base64').toString('utf8');
+  const serviceAccount = JSON.parse(serviceAccountJson);
+
   admin.initializeApp({
-    credential: admin.credential.cert(serviceAccountConfig),
+    credential: admin.credential.cert(serviceAccount),
   });
-}
+
+  console.log('✅ Firebase initialized');
+};
+
+initializeFirebase();
 
 const app = express();
 const db = admin.firestore();
 const messaging = admin.messaging();
 
-app.use(cors());
+// Update CORS configuration
+app.use(cors({
+  origin: true, // Reflects the request origin
+  credentials: true,
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
+
+// Add explicit preflight handling
+app.options('*', cors());
 app.use(express.json());
 
-// Middleware xác thực
+// Auth middleware
 async function authenticate(req: any, res: any, next: any) {
   try {
     const authHeader = req.headers.authorization;
-
-    if (!authHeader) {
-      return res.status(401).json({ error: 'Authorization header missing' });
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Unauthorized' });
     }
-
-    // Hỗ trợ các dạng khác nhau của header
-    const token = authHeader.startsWith('Bearer ')
-      ? authHeader.split('Bearer ')[1]
-      : authHeader.startsWith('bearer ')
-      ? authHeader.split('bearer ')[1]
-      : authHeader;
-
-    if (!token) {
-      return res.status(401).json({ error: 'Token missing' });
-    }
-
+    const token = authHeader.split('Bearer ')[1];
     const decodedToken = await admin.auth().verifyIdToken(token);
     req.user = decodedToken;
-
-    if (!req.user?.uid) {
-      return res.status(401).json({ error: 'Invalid token (no uid)' });
-    }
-
     next();
-  } catch (error) {
-    console.error('Error verifying Firebase token:', error);
-    return res.status(401).json({ error: 'Invalid or expired token' });
+  } catch (error: any) {
+    res.status(401).json({ error: 'Invalid token' });
   }
 }
 
-
-// Middleware kiểm tra admin
 async function requireAdmin(req: any, res: any, next: any) {
   try {
     const userDoc = await db.collection('users').doc(req.user.uid).get();
     const userData = userDoc.data();
-
     if (userData?.role !== 'admin') {
       return res.status(403).json({ error: 'Admin access required' });
     }
-
     next();
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
