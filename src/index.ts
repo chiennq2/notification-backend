@@ -1,4 +1,3 @@
-// server/index.ts
 import express from 'express';
 import cors from 'cors';
 import * as admin from 'firebase-admin';
