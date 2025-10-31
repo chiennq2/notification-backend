@@ -18,6 +18,11 @@
       "destination": "/api/sendScheduledNotifications"
     }
   ],
+  "crons": [{
+    "path": "/api/notifications/send-scheduled",
+    "menthod": "POST",
+    "schedule": "*/5 * * * *"
+  }],
     "headers": [
     {
       "source": "/api/(.*)",
