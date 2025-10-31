@@ -280,6 +280,74 @@ app.post('/api/notifications/schedule', authenticate, requireAdmin, async (req, 
   }
 });
 
+// ===== 3.5. Xử lý gửi thông báo đã lên lịch (chuyển từ sendScheduledNotifications.ts) =====
+
+// API endpoint để xử lý gửi thông báo đã lên lịch
+app.get('/api/notifications/send-scheduled', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const now = new Date();
+    const snapshot = await db
+      .collection('scheduledNotifications')
+      .where('status', '==', 'pending')
+      .where('scheduledTime', '<=', now)
+      .get();
+
+    if (snapshot.empty) {
+      return res.status(200).json({ message: 'No scheduled notifications to send' });
+    }
+
+    console.log(`⏰ Processing ${snapshot.docs.length} scheduled notifications`);
+
+    for (const doc of snapshot.docs) {
+      const notification = doc.data();
+      try {
+        const tokensSnapshot = await db.collection('deviceTokens').get();
+        const tokens = tokensSnapshot.docs.map((d) => d.data().token);
+
+        if (tokens.length === 0) continue;
+
+        const result = await sendNotificationWithOfflineSupport(tokens, {
+          title: notification.title,
+          body: notification.body,
+          imageUrl: notification.imageUrl,
+          clickAction: notification.clickAction,
+          data: notification.data,
+        });
+
+        const updateData: any = {
+          status: 'sent',
+          sentAt: admin.firestore.FieldValue.serverTimestamp(),
+          successCount: result.successCount,
+          failureCount: result.failureCount,
+        };
+
+        if (notification.recurring?.enabled) {
+          const nextTime = calculateNextScheduledTime(
+            notification.scheduledTime.toDate(),
+            notification.recurring
+          );
+          updateData.scheduledTime = admin.firestore.Timestamp.fromDate(nextTime);
+          updateData.status = 'pending';
+        }
+
+        await doc.ref.update(updateData);
+        console.log(`✅ Sent scheduled notification: ${doc.id}`);
+      } catch (error) {
+        console.error(`❌ Error: ${doc.id}`, error);
+        await doc.ref.update({
+          status: 'failed',
+          error: String(error),
+        });
+      }
+    }
+
+    res.status(200).json({ message: 'Scheduled notifications processed successfully' });
+  } catch (error) {
+    console.error('Error processing scheduled notifications:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // 4. Lấy danh sách thông báo đã lên lịch
 app.get('/api/notifications/scheduled', authenticate, requireAdmin, async (req, res) => {
   try {
@@ -552,6 +620,152 @@ if (!process.env.VERCEL) {
   }, 60000); // Mỗi 60 giây
 
   console.log('⏰ Notification scheduler started (runs every 60 seconds)');
+}
+
+interface NotificationOptions {
+  title: string;
+  body: string;
+  imageUrl?: string;
+  clickAction?: string;
+  data?: Record<string, string>;
+}
+
+
+async function sendNotificationWithOfflineSupport(
+  tokens: string[],
+  options: NotificationOptions
+) {
+  const { title, body, imageUrl, clickAction, data } = options;
+
+  const batchSize = 500;
+  let successCount = 0;
+  let failureCount = 0;
+  const failedTokens: string[] = [];
+
+  for (let i = 0; i < tokens.length; i += batchSize) {
+    const batch = tokens.slice(i, i + batchSize);
+
+    // ✅ Cấu hình message với offline support
+    const message: admin.messaging.MulticastMessage = {
+      notification: {
+        title,
+        body,
+        ...(imageUrl && { imageUrl }),
+      },
+      // 🔥 DATA PAYLOAD - Quan trọng cho offline
+      data: {
+        title,
+        body,
+        timestamp: new Date().toISOString(),
+        notificationId: `notif_${Date.now()}`,
+        ...(clickAction && { clickAction }),
+        ...data,
+      },
+      // ⚙️ Android config
+      android: {
+        priority: 'high', // ✅ Priority cao để nhận khi offline
+        ttl: 2419200000, // ✅ 4 weeks (28 days) in milliseconds
+        notification: {
+          sound: 'default',
+          clickAction: clickAction || '/',
+          channelId: 'default',
+          priority: 'high',
+          defaultSound: true,
+          defaultVibrateTimings: true,
+        },
+      },
+      // ⚙️ APNS config (iOS - nếu có)
+      apns: {
+        payload: {
+          aps: {
+            alert: {
+              title,
+              body,
+            },
+            sound: 'default',
+            badge: 1,
+            contentAvailable: true, // ✅ Wake up app in background
+          },
+        },
+        headers: {
+          'apns-priority': '10', // ✅ High priority
+          'apns-expiration': String(Math.floor(Date.now() / 1000) + 2419200), // 28 days
+        },
+      },
+      // ⚙️ Web Push config
+      webpush: {
+        notification: {
+          title,
+          body,
+          icon: '/favicon.ico',
+          badge: '/badge-icon.png',
+          ...(imageUrl && { image: imageUrl }),
+          requireInteraction: true, // ✅ Notification không tự đóng
+          tag: `notif_${Date.now()}`, // Group notifications
+          renotify: true,
+          vibrate: [200, 100, 200],
+          actions: [
+            {
+              action: 'open',
+              title: 'Mở',
+            },
+            {
+              action: 'close',
+              title: 'Đóng',
+            },
+          ],
+        },
+        headers: {
+          TTL: '2419200', // ✅ 28 days in seconds
+          Urgency: 'high', // ✅ High urgency
+        },
+        fcmOptions: {
+          link: clickAction || '/',
+        },
+      },
+      tokens: batch,
+    };
+
+    try {
+      const response = await messaging.sendEachForMulticast(message);
+      successCount += response.successCount;
+      failureCount += response.failureCount;
+
+      // Thu thập token lỗi
+      response.responses.forEach((resp, idx) => {
+        if (!resp.success) {
+          const errorCode = resp.error?.code;
+          // Chỉ xóa token nếu là lỗi vĩnh viễn
+          if (
+            errorCode === 'messaging/invalid-registration-token' ||
+            errorCode === 'messaging/registration-token-not-registered'
+          ) {
+            failedTokens.push(batch[idx]);
+          }
+          console.log(`❌ Token ${idx}: ${errorCode}`);
+        }
+      });
+    } catch (error: any) {
+      console.error('Batch send error:', error);
+      failureCount += batch.length;
+    }
+  }
+
+  // Xóa token không hợp lệ
+  if (failedTokens.length > 0) {
+    console.log(`🗑️  Removing ${failedTokens.length} invalid tokens`);
+    await Promise.all(
+      failedTokens.map(async (token) => {
+        const snapshot = await db
+          .collection('deviceTokens')
+          .where('token', '==', token)
+          .get();
+        return Promise.all(snapshot.docs.map(doc => doc.ref.delete()));
+      })
+    );
+  }
+
+  return { successCount, failureCount, totalDevices: tokens.length };
 }
 
 // Hàm tính thời gian tiếp theo cho recurring notification
