@@ -5,6 +5,15 @@ import * as admin from 'firebase-admin';
 import { readFileSync, existsSync } from 'fs';
 import path from 'path';
 
+// Mở rộng interface Request để thêm 'user'
+declare global {
+  namespace Express {
+    interface Request {
+      user?: admin.auth.DecodedIdToken;
+    }
+  }
+}
+
 // Khởi tạo Firebase Admin SDK
 const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
 let serviceAccountConfig: admin.ServiceAccount;
@@ -39,18 +48,37 @@ app.use(express.json());
 // Middleware xác thực
 async function authenticate(req: any, res: any, next: any) {
   try {
-    const token = req.headers.authorization?.split('Bearer ')[1];
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader) {
+      return res.status(401).json({ error: 'Authorization header missing' });
+    }
+
+    // Hỗ trợ các dạng khác nhau của header
+    const token = authHeader.startsWith('Bearer ')
+      ? authHeader.split('Bearer ')[1]
+      : authHeader.startsWith('bearer ')
+      ? authHeader.split('bearer ')[1]
+      : authHeader;
+
     if (!token) {
-      return res.status(401).json({ error: 'Unauthorized' });
+      return res.status(401).json({ error: 'Token missing' });
     }
 
     const decodedToken = await admin.auth().verifyIdToken(token);
     req.user = decodedToken;
+
+    if (!req.user?.uid) {
+      return res.status(401).json({ error: 'Invalid token (no uid)' });
+    }
+
     next();
   } catch (error) {
-    res.status(401).json({ error: 'Invalid token' });
+    console.error('Error verifying Firebase token:', error);
+    return res.status(401).json({ error: 'Invalid or expired token' });
   }
 }
+
 
 // Middleware kiểm tra admin
 async function requireAdmin(req: any, res: any, next: any) {
@@ -236,7 +264,6 @@ app.post('/api/notifications/schedule', authenticate, requireAdmin, async (req, 
       scheduledTime: admin.firestore.Timestamp.fromDate(scheduledDate),
       status: 'pending',
       targetType: 'all',
-      createdBy: req.user.uid,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       recurring: recurring || null,
     };
@@ -304,7 +331,6 @@ app.patch('/api/notifications/scheduled/:id/cancel', authenticate, requireAdmin,
     await docRef.update({ 
       status: 'cancelled',
       cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
-      cancelledBy: req.user.uid,
     });
 
     res.json({ success: true, message: 'Notification cancelled' });
